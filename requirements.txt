@@ -6,3 +6,4 @@ pandas
 scikit-learn
 xgboost
 tensorflow-cpu
+dill
