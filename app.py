@@ -1,10 +1,11 @@
+# app.py
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
 import pickle
-import warnings
 from io import BytesIO
+import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================================
@@ -14,13 +15,9 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================================================
-# 2️⃣ CRITICAL: Define the ExoplanetEnsemble class EXACTLY as in Streamlit
+# 2️⃣ ExoplanetEnsemble class (must match pickled model)
 # ============================================================
 class ExoplanetEnsemble:
-    """
-    Ensemble model combining DNN, SVM, Decision Tree, Random Forest, and XGBoost
-    """
-    
     def __init__(self):
         self.model_dnn = None
         self.scaler_dnn = None
@@ -33,7 +30,6 @@ class ExoplanetEnsemble:
         self.weights = None
     
     def predict_proba(self, X):
-        """Predict probabilities using weighted soft voting"""
         if self.feature_names is not None and not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=self.feature_names)
         
@@ -71,10 +67,8 @@ class ExoplanetEnsemble:
         return ensemble_proba
     
     def predict(self, X, threshold=0.5):
-        """Predict class labels"""
         if self.feature_names is not None and not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=self.feature_names)
-        
         proba = self.predict_proba(X)
         if proba.shape[1] == 2:
             return (proba[:, 1] >= threshold).astype(int)
@@ -82,7 +76,6 @@ class ExoplanetEnsemble:
             return np.argmax(proba, axis=1)
     
     def predict_with_confidence(self, X):
-        """Predict with confidence scores and individual model predictions"""
         if self.feature_names is not None and not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X, columns=self.feature_names)
         
@@ -90,7 +83,6 @@ class ExoplanetEnsemble:
         X_scaled_svm = self.scaler_svm.transform(X)
         
         pred_dnn = self.model_dnn.predict(X_scaled_dnn, verbose=0)
-        
         if hasattr(self.model_svm, 'predict_proba'):
             pred_svm = self.model_svm.predict_proba(X_scaled_svm)
         else:
@@ -134,11 +126,10 @@ class ExoplanetEnsemble:
                     'XGBoost': pred_xgb[i].tolist()
                 }
             })
-        
         return results if len(results) > 1 else results[0]
 
 # ============================================================
-# 3️⃣ Feature names (must match the order used in training)
+# 3️⃣ Feature names (must match training)
 # ============================================================
 FEATURE_NAMES = [
     'koi_score', 'koi_fpflag_nt', 'koi_fpflag_ss', 'koi_fpflag_co', 'koi_fpflag_ec',
@@ -150,7 +141,6 @@ FEATURE_NAMES = [
 # 4️⃣ Load the ensemble model
 # ============================================================
 model_path = "ensemble_model.pkl"
-
 try:
     with open(model_path, 'rb') as f:
         model = pickle.load(f)
@@ -177,35 +167,22 @@ def predict():
     if model is None:
         return jsonify({"error": "Model not loaded."}), 500
 
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data provided"}), 400
+
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-
-        # Extract features in order
-        features = []
-        for name in FEATURE_NAMES:
-            if name not in data:
-                return jsonify({"error": f"Missing feature: {name}"}), 400
-            features.append(float(data[name]))
-
+        features = [float(data[name]) for name in FEATURE_NAMES]
         X = np.array([features])
-
-        # Make prediction with confidence
         result = model.predict_with_confidence(X)
-        
-        # Extract prediction and confidence
         prediction = result['prediction']
-        confidence = result['confidence'] * 100  # Convert to percentage
-        
-        # Binary classification: 1 = Planet, 0 or -1 = Not a Planet
+        confidence = result['confidence'] * 100
         is_planet = prediction == 1
 
         if is_planet:
             return jsonify({
                 "status": "positive",
                 "message": "High probability of exoplanet detection",
-                "details": "The analyzed parameters suggest strong exoplanet characteristics",
                 "confidence": round(confidence, 1),
                 "individual_predictions": result['individual_predictions'],
                 "individual_probabilities": result['individual_probabilities']
@@ -214,20 +191,15 @@ def predict():
             return jsonify({
                 "status": "negative",
                 "message": "Low probability of exoplanet detection",
-                "details": "The analyzed parameters do not indicate clear exoplanet signals",
                 "confidence": round(confidence, 1),
                 "individual_predictions": result['individual_predictions'],
                 "individual_probabilities": result['individual_probabilities']
             })
-
     except Exception as e:
-        print(f"Prediction error: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
 
 # ============================================================
-# 7️⃣ CSV prediction route - RETURNS CSV FILE
+# 7️⃣ CSV prediction route
 # ============================================================
 @app.route("/predict_csv", methods=["POST"])
 def predict_csv():
@@ -243,66 +215,36 @@ def predict_csv():
     except Exception as e:
         return jsonify({"error": f"Error reading CSV: {e}"}), 400
 
-    # Check if all required features are present
     missing_features = [f for f in FEATURE_NAMES if f not in df.columns]
     if missing_features:
-        return jsonify({
-            "error": f"Missing required features: {', '.join(missing_features)}"
-        }), 400
+        return jsonify({"error": f"Missing features: {', '.join(missing_features)}"}), 400
 
-    # Extract only the required features in the correct order
     X = df[FEATURE_NAMES]
+    results = model.predict_with_confidence(X)
+    if not isinstance(results, list):
+        results = [results]
 
-    # Make predictions
-    try:
-        results = model.predict_with_confidence(X)
-        
-        # If single row, convert to list
-        if not isinstance(results, list):
-            results = [results]
-        
-        # Create output dataframe with original data + predictions
-        output_df = df.copy()
-        
-        # Add prediction results
-        output_df['prediction'] = [r['prediction'] for r in results]
-        output_df['prediction_label'] = output_df['prediction'].apply(
-            lambda x: 'EXOPLANET' if x == 1 else 'NOT_EXOPLANET'
-        )
-        output_df['confidence_percentage'] = [round(r['confidence'] * 100, 2) for r in results]
-        
-        # Add individual model predictions
-        output_df['pred_DNN'] = [r['individual_predictions']['DNN'] for r in results]
-        output_df['pred_SVM'] = [r['individual_predictions']['SVM'] for r in results]
-        output_df['pred_DecisionTree'] = [r['individual_predictions']['Decision_Tree'] for r in results]
-        output_df['pred_RandomForest'] = [r['individual_predictions']['Random_Forest'] for r in results]
-        output_df['pred_XGBoost'] = [r['individual_predictions']['XGBoost'] for r in results]
-        
-        # Convert to CSV in memory
-        output = BytesIO()
-        output_df.to_csv(output, index=False)
-        output.seek(0)
-        
-        # Return CSV file
-        return send_file(
-            output,
-            mimetype='text/csv',
-            as_attachment=True,
-            download_name='exoplanet_predictions.csv'
-        )
-        
-    except Exception as e:
-        print(f"CSV Prediction error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
+    output_df = df.copy()
+    output_df['prediction'] = [r['prediction'] for r in results]
+    output_df['prediction_label'] = output_df['prediction'].apply(lambda x: 'EXOPLANET' if x == 1 else 'NOT_EXOPLANET')
+    output_df['confidence_percentage'] = [round(r['confidence']*100,2) for r in results]
+    output_df['pred_DNN'] = [r['individual_predictions']['DNN'] for r in results]
+    output_df['pred_SVM'] = [r['individual_predictions']['SVM'] for r in results]
+    output_df['pred_DecisionTree'] = [r['individual_predictions']['Decision_Tree'] for r in results]
+    output_df['pred_RandomForest'] = [r['individual_predictions']['Random_Forest'] for r in results]
+    output_df['pred_XGBoost'] = [r['individual_predictions']['XGBoost'] for r in results]
+
+    output = BytesIO()
+    output_df.to_csv(output, index=False)
+    output.seek(0)
+
+    return send_file(output, mimetype='text/csv', as_attachment=True, download_name='exoplanet_predictions.csv')
 
 # ============================================================
-# 8️⃣ CSV statistics route - RETURNS JSON STATS ONLY
+# 8️⃣ CSV statistics route
 # ============================================================
 @app.route("/predict_csv_stats", methods=["POST"])
 def predict_csv_stats():
-    """Returns only statistics without the CSV file"""
     if model is None:
         return jsonify({"error": "Model not loaded."}), 500
 
@@ -315,44 +257,25 @@ def predict_csv_stats():
     except Exception as e:
         return jsonify({"error": f"Error reading CSV: {e}"}), 400
 
-    # Check if all required features are present
     missing_features = [f for f in FEATURE_NAMES if f not in df.columns]
     if missing_features:
-        return jsonify({
-            "error": f"Missing required features: {', '.join(missing_features)}"
-        }), 400
+        return jsonify({"error": f"Missing features: {', '.join(missing_features)}"}), 400
 
-    # Extract only the required features in the correct order
     X = df[FEATURE_NAMES]
+    results = model.predict_with_confidence(X)
+    if not isinstance(results, list):
+        results = [results]
 
-    # Make predictions
-    try:
-        results = model.predict_with_confidence(X)
-        
-        # If single row, convert to list
-        if not isinstance(results, list):
-            results = [results]
-        
-        # Count positive predictions
-        positive_count = sum(1 for r in results if r['prediction'] == 1)
-        
-        # Calculate average confidence
-        avg_confidence = np.mean([r['confidence'] for r in results]) * 100
+    positive_count = sum(1 for r in results if r['prediction']==1)
+    avg_confidence = np.mean([r['confidence'] for r in results])*100
 
-        return jsonify({
-            "status": "success",
-            "message": "Bulk analysis completed successfully",
-            "details": f"Processed {len(results)} exoplanet candidates from CSV file",
-            "confidence": round(avg_confidence, 1),
-            "candidatesFound": positive_count,
-            "totalProcessed": len(results)
-        })
-        
-    except Exception as e:
-        print(f"CSV Stats error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": f"Stats calculation failed: {str(e)}"}), 500
+    return jsonify({
+        "status": "success",
+        "message": "Bulk analysis completed successfully",
+        "candidatesFound": positive_count,
+        "totalProcessed": len(results),
+        "average_confidence": round(avg_confidence, 1)
+    })
 
 # ============================================================
 # 9️⃣ Run the app
