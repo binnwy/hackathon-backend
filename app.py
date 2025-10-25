@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
-import dill
+import pickle
 import warnings
 from io import BytesIO
 warnings.filterwarnings('ignore')
@@ -149,7 +149,7 @@ model_path = "ensemble_model.pkl"
 
 try:
     with open(model_path, 'rb') as f:
-        model = dill.load(f)
+        model = pickle.load(f)  # ← Change from dill.load to pickle.load
     print("✅ Ensemble model loaded successfully.")
 except Exception as e:
     print(f"❌ Error loading ensemble model: {e}")
